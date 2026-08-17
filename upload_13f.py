@@ -19,11 +19,23 @@ out/*.json 을 Firestore 로 올린다.
 ⚠ 서비스 계정 권한은 shared/f13_* 만 쓰게 제한해라.
    기존 키를 그대로 쓰면 공개 저장소가 market_data 도 지울 권한을 갖는다.
 """
-import argparse, json, os, sys
+import argparse, json, math, os, sys
 
 OUT = "out"
 DOCS = [("f13_v1", "f13_v1.json"), ("f13_hold", "f13_hold.json")]
 LIMIT = 1024 * 1024          # Firestore 문서 한도 1MiB
+
+
+def clean(o):
+    """NaN·Infinity 를 없앤다.
+    ⚠ Python 은 NaN 을 그대로 쓰지만 JS 의 JSON.parse 는 못 읽는다 — 앱이 통째로 깨진다."""
+    if isinstance(o, float):
+        return 0 if (math.isnan(o) or math.isinf(o)) else o
+    if isinstance(o, dict):
+        return {k: clean(v) for k, v in o.items()}
+    if isinstance(o, list):
+        return [clean(v) for v in o]
+    return o
 
 
 def credentials():
@@ -48,13 +60,22 @@ def main():
             sys.exit(f"⚠ {p} 가 없다. build_13f.py 를 먼저 돌려라.")
         with open(p, encoding="utf-8") as f:
             data = json.load(f)
-        body = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        data = clean(data)
+        body = json.dumps(data, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
         size = len(body.encode("utf-8"))
         pct = size / LIMIT * 100
         flag = "  ⚠ 한도 초과 — 문서를 쪼개야 한다" if size > LIMIT else ""
         print(f"{doc:<10} {size/1024:>8.1f} KB   한도의 {pct:>4.0f}%{flag}")
         if size > LIMIT:
             sys.exit(1)
+        # ⚠ 빈 결과를 올리면 앱의 표가 통째로 사라진다. 배치가 건너뛴 실행에서 실제로 그랬다.
+        if doc == "f13_v1":
+            n = len(data.get("rows") or [])
+            if n == 0:
+                sys.exit("⚠ f13_v1 의 펀드가 0곳이다. 올리지 않는다 — build_13f.py 를 먼저 돌려라.")
+            print(f"{'':<10} 펀드 {n}곳")
+        if doc == "f13_hold" and not (data.get("hold") or {}):
+            sys.exit("⚠ f13_hold 가 비었다. 올리지 않는다.")
         payloads.append((doc, data.get("meta", {}), body))
 
     if a.dry:

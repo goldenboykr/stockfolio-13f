@@ -93,6 +93,10 @@ def fetch(cik, want_period=None):
         val  = g("Value", "value") or 0
         sh   = g("SharesPrnAmount", "shares", "sshPrnamt") or 0
         tkr  = g("Ticker", "ticker") or ""
+        # ⚠ CUSIP 으로 티커를 못 찾으면 NaN 이 온다. NaN 은 참이라 'or cusip' 이 안 먹는다.
+        if not isinstance(tkr, str):
+            tkr = "" if (tkr is None or tkr != tkr) else str(tkr)
+        tkr = tkr.strip()
 
         try:  val = float(str(val).replace(",", ""))
         except Exception: val = 0.0
@@ -113,9 +117,12 @@ def fetch(cik, want_period=None):
             merged[k] = r
     rows = list(merged.values())
 
-    total = sum(r["val"] for r in rows) or 1.0
+    total = sum(r["val"] for r in rows)
+    if not total or total != total:      # 0 이거나 NaN
+        total = 1.0
     for r in rows:
-        r["w"] = round(r["val"] / total * 100, 2)
+        w = r["val"] / total * 100
+        r["w"] = 0.0 if w != w else round(w, 2)     # ⚠ NaN 은 JS 가 못 읽는다
     rows.sort(key=lambda r: -r["val"])
     return (period, filed, rows)          # ⚠ 자르지 않는다. 자르면 비교가 틀린다
 
@@ -133,6 +140,9 @@ def diff(cur, prev):
             r["st"], r["chg"] = "NEW", None
         else:
             d = (r["sh"] - p["sh"]) / p["sh"] * 100
+            if d != d:                  # NaN
+                r["st"], r["chg"] = "—", None
+                continue
             r["chg"] = round(d, 1)
             r["st"] = "ADD" if d > 0.5 else "TRIM" if d < -0.5 else "—"
 
@@ -169,6 +179,22 @@ def main():
     period = probe[0]
     print(f"기준 분기 = {period}")
 
+    # ⚠ 상태는 있는데 결과 파일이 비었으면 건너뛰면 안 된다.
+    #   실제로 Actions 가 캐시된 상태만 복원해 빈 결과를 올린 적이 있다.
+    v1_path = f"{OUT}/f13_v1.json"
+    v1_ok = False
+    if os.path.exists(v1_path):
+        try:
+            with open(v1_path, encoding="utf-8") as f:
+                _o = json.load(f)
+            v1_ok = (_o.get("meta", {}).get("period") == period) and bool(_o.get("rows"))
+        except Exception:
+            v1_ok = False
+    if not v1_ok:
+        done = {}
+        st["funds"] = {}
+        print("→ 결과 파일이 없거나 비었다. 처음부터 받는다.")
+
     have = sum(1 for fd in funds if done.get(fd["fund"]) == period)
     if period == st["period"] and have >= len(funds) and not a.force:
         print(f"→ 이미 받은 분기다 ({have}/{len(funds)}곳 완료). 할 일 없음.")
@@ -187,7 +213,24 @@ def main():
     print(f"전 분기 = {prev_period or '없음 (증감 계산 못 함)'}")
     print("─" * 78)
 
+    # ⚠ 이전 실행 결과를 읽어 이어쓴다. 안 그러면 건너뛴 펀드가 사라진다.
     v1, hold, skipped = [], {}, []
+    for path, box in ((f"{OUT}/f13_v1.json", "v1"), (f"{OUT}/f13_hold.json", "hold")):
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                old = json.load(f)
+            if old.get("meta", {}).get("period") != period:
+                continue                      # 다른 분기 것이면 버린다
+            if box == "v1":
+                v1 = old.get("rows", [])
+            else:
+                hold = old.get("hold", {})
+        except Exception as e:
+            print(f"⚠ {path} 를 못 읽었다: {e}")
+    if v1 or hold:
+        print(f"→ 이전 결과 {len(v1)}곳 이어쓴다.")
 
     for i, fd in enumerate(funds, 1):
         name, cik = fd["fund"], fd["cik"]
@@ -225,14 +268,20 @@ def main():
         buys = sorted([r for r in rows if r["st"] in ("NEW", "ADD")],
                       key=lambda r: -r["w"])[:6]
 
+        v1 = [x for x in v1 if x["n"] != name]
         v1.append({"n": name, "g": fd["group"], "corp": int(fd.get("corp", 0) or 0),
                    "fd": filed[5:] if len(filed) >= 10 else filed,
                    "nw": nw, "ad": ad, "dn": dn, "ex": ex,
                    "hold": sum(1 for r in rows if r["st"] != "EXIT"),
+                   "cut": full if full > CAP else 0,   # 상한에 걸린 펀드는 전체 개수를 남긴다
                    "buys": [[r["t"] or r["cusip"], r["w"], 1 if r["st"] == "NEW" else 0]
                             for r in buys]})
-        # ⚠ 저장은 여기서만 자른다 — 변동이 있는 것을 먼저, 그다음 비중순
-        keep = [r for r in rows if r["st"] != "—"] + [r for r in rows if r["st"] == "—"]
+        # ⚠ 저장은 여기서만 자른다.
+        #   100개를 넘으면 무엇을 남길지가 문제다 → 우선순위를 못 박는다.
+        #   ① 신규  ② 증액  ③ 감소  ④ 청산  ⑤ 변동 없음
+        #   같은 등급 안에서는 비중 큰 것 우선 (rows 가 이미 비중순이다)
+        PRIO = {"NEW": 0, "ADD": 1, "TRIM": 2, "EXIT": 3, "—": 4}
+        keep = sorted(rows, key=lambda r: PRIO.get(r["st"], 9))
         hold[name] = [[r["t"] or r["cusip"], r["name"], r["w"], r["sh"],
                        r["chg"], r["st"]] for r in keep[:CAP]]
 
@@ -246,12 +295,15 @@ def main():
         print(f"   받음 {len(v1)}곳 · 건너뜀 {len(skipped)}곳")
         return
 
+    order = {fd["fund"]: i for i, fd in enumerate(funds)}
+    v1.sort(key=lambda x: order.get(x["n"], 999))
+
     os.makedirs(OUT, exist_ok=True)
     meta = {"period": period, "prev": prev_period,
             "built": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "funds": len(v1), "skipped": skipped}
     with open(f"{OUT}/f13_v1.json", "w", encoding="utf-8") as f:
-        json.dump({"meta": meta, "rows": v1}, f, ensure_ascii=False, separators=(",", ":"))
+        json.dump({"meta": meta, "rows": v1}, f, ensure_ascii=False, separators=(",", ":"))   # ⚠ upload_13f.clean() 이 NaN 을 다시 걸른다
     with open(f"{OUT}/f13_hold.json", "w", encoding="utf-8") as f:
         json.dump({"meta": meta, "hold": hold}, f, ensure_ascii=False, separators=(",", ":"))
 
