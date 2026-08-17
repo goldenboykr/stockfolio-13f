@@ -1,0 +1,3 @@
+edgartools
+google-cloud-firestore
+requests

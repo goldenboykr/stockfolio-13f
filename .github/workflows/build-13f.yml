@@ -52,7 +52,7 @@ jobs:
 
       - name: 라이브러리
         if: steps.gate.outputs.go == 'yes'
-        run: pip install edgartools google-cloud-firestore
+        run: pip install -r requirements.txt
 
       # ⚠ 이어받기 상태를 캐시로 남긴다. 없으면 매주 72 곳을 다시 받는다.
       - name: 상태 캐시 복원
