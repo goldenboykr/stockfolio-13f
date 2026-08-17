@@ -1,0 +1,40 @@
+# GitHub Actions 러너에서 SEC 가 열려 있는지 확인한다.
+#
+# ⚠ 이게 진짜 확인해야 할 것이다. 로컬 IP 와 러너 IP 는 다르고,
+#   SEC 차단은 IP 단위로 보인다(핸드오프 §H).
+# ⚠ 공개 저장소(stockfolio-13f)에 두면 이 워크플로는 분을 안 먹는다.
+#
+# 실행: Actions 탭 → sec-probe → Run workflow (수동)
+
+name: sec-probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 러너 IP 확인
+        # ⚠ 결과를 로그에 남겨 둔다. 나중에 막혔을 때 IP 대역을 비교할 수 있다.
+        run: curl -s https://api.ipify.org || true
+
+      - name: 설치
+        run: pip install --quiet edgartools requests
+
+      - name: 진단 실행
+        run: python sec_probe.py
+
+      - name: 결과 업로드
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sec-probe-result
+          path: sec_probe_result.json
