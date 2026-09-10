@@ -1,0 +1,56 @@
+name: 13F 제출 여부 확인
+
+# 배치가 '미제출' 로 건너뛴 곳이 **왜** 없는지 가른다.
+#   ① CIK 가 딴 데를 가리킨다   ② 13F 를 아예 안 낸다   ③ 그 분기만 늦다
+# 셋은 각각 다른 조치라서, 구분하지 않으면 매 분기 같은 소음을 본다.
+#
+# ⚠ 집 IP 는 SEC 가 403 이다 (2026-08-29 실측 · 네트워크 단위 판정).
+#   그래서 러너에서만 돌아간다. build-13f 가 GitHub 러너인 것과 같은 이유다.
+# ⚠ 예약이 없다. 손으로만 돌린다 — 1분짜리고, 이 저장소는 공개라 분이 무료다.
+# ⚠ Firestore 를 건드리지 않는다. **읽기만 하는 진단**이라 시크릿이 없다.
+#   build-13f 와 concurrency 그룹이 달라 같이 돌려도 된다.
+
+on:
+  workflow_dispatch:
+    inputs:
+      period:
+        description: '확인할 분기말 (YYYY-MM-DD)'
+        default: '2026-06-30'
+      names:
+        description: "펀드 이름 · 쉼표로 구분 (비우면 지난번 미제출 7곳 · ALL 이면 전부)"
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 러너 IP
+        # ⚠ 남겨 둔다. 나중에 여기도 막히면 어느 대역이었는지 비교해야 한다.
+        run: curl -s https://api.ipify.org || true
+
+      - name: 설치
+        run: pip install --quiet requests
+
+      - name: 확인
+        # ⚠ 입력을 명령줄에 직접 끼워 넣지 않는다(셸 주입). env 로 넘긴다.
+        # ⚠ 이름에 공백이 있다(Pershing Square). 그래서 공백이 아니라 **쉼표**로
+        #   나눈다 — 셸 단어분리에 맡기면 두 곳으로 쪼개진다.
+        env:
+          PERIOD: ${{ inputs.period }}
+          NAMES: ${{ inputs.names }}
+        run: |
+          if [ "$NAMES" = "ALL" ]; then
+            python check_13f_filers.py --period "$PERIOD" --all
+          else
+            python check_13f_filers.py --period "$PERIOD" --csv "$NAMES"
+          fi
