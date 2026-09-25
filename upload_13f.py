@@ -103,6 +103,15 @@ def main():
             "json": body,                    # ⚠ 본문은 문자열 한 덩어리
         })
         print(f"→ shared/{doc} 올렸다  ({len(body.encode('utf-8'))/1024:.1f} KB)")
+    # ⚠ 버전 기록 (2026-09-25 · stockfolio-batch push_firestore.note_version 과 같은 모양) — 앱은 이 칸이 바뀌면 캐시를 버리고 새로 받는다.
+    #   merge — 다른 배치의 칸을 지우지 않는다. 두 문서(f13_v1·f13_hold)를 한 칸 'f13' 으로.
+    try:
+        from datetime import datetime, timezone, timedelta
+        st = datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds")
+        db.collection("shared").document("versions").set({"f13": st}, merge=True)
+        print(f"→ shared/versions.f13 = {st}")
+    except Exception as e:
+        print(f"⚠ versions 기록 실패(본 저장은 끝났다): {e}")
 
     print("\n끝났다. 앱에서 shared/f13_v1 을 읽어 JSON.parse 하면 된다.")
 
