@@ -1,3 +1,5 @@
 ﻿serviceAccount.json
 out/
 __pycache__/
+dump/
+dump.zip
