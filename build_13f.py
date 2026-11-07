@@ -47,24 +47,25 @@ def save_state(st):
 
 
 # ── 13F 한 곳 ─────────────────────────────────────────────────────────
-def fetch(cik, want_period=None):
-    """(period, filed, [{t,name,w,sh,val}]) 를 돌려준다. 없으면 None."""
-    c = Company(cik)
-    fs = c.get_filings(form="13F-HR")
+def latest_two(cik):
+    """그 펀드의 최신 13F 와 직전 분기 13F → (cur, prev). 없으면 (None, None).
+    ⚠ 펀드마다 자기 최신 분기다 (2026-11-07) — 일찍 낸 곳은 일찍 보인다."""
+    fs = Company(cik).get_filings(form="13F-HR")
     if not fs or len(fs) == 0:
-        return None
-
-    # 최신 것부터 훑어 want_period 를 찾는다 (없으면 최신)
-    target = None
-    for i in range(min(len(fs), 6)):
-        f = fs[i]
-        per = str(getattr(f, "period_of_report", "") or "")
-        if want_period is None or per == want_period:
-            target = f
+        return None, None
+    cur = fs[0]
+    cp = str(getattr(cur, "period_of_report", "") or "")
+    prev = None
+    for i in range(1, min(len(fs), 8)):
+        p = str(getattr(fs[i], "period_of_report", "") or "")
+        if p and p < cp:                  # ⚠ 같은 분기 재제출은 건너뛴다
+            prev = fs[i]
             break
-    if target is None:
-        return None
+    return cur, prev
 
+
+def fetch(target):
+    """13F 한 건 → (period, filed, [{t,name,w,sh,val}])"""
     period = str(getattr(target, "period_of_report", "") or "")
     filed  = str(getattr(target, "filing_date", "") or "")
 
@@ -173,96 +174,69 @@ def main():
         funds = funds[:a.limit]
 
     st = load_state()
-    done = st.get("funds", {})
-    print(f"펀드 {len(funds)}곳 · 마지막 분기 {st['period'] or '없음'}")
+    done = st.get("funds", {})            # 펀드 → 받은 분기
+    print(f"펀드 {len(funds)}곳 · 지난 실행 최신 분기 {st.get('period') or '없음'}")
     print("─" * 78)
 
-    # ① 기준 분기를 먼저 정한다 — 첫 펀드의 최신 분기
-    time.sleep(GAP)
-    probe = fetch(funds[0]["cik"])
-    if probe is None:
-        sys.exit("⚠ 첫 펀드에서 13F 를 못 찾았다. CIK 를 확인해라.")
-    period = probe[0]
-    print(f"기준 분기 = {period}")
-
-    # ⚠ 상태는 있는데 결과 파일이 비었으면 건너뛰면 안 된다.
-    #   실제로 Actions 가 캐시된 상태만 복원해 빈 결과를 올린 적이 있다.
-    v1_path = f"{OUT}/f13_v1.json"
-    v1_ok = False
-    if os.path.exists(v1_path):
-        try:
-            with open(v1_path, encoding="utf-8") as f:
-                _o = json.load(f)
-            v1_ok = (_o.get("meta", {}).get("period") == period) and bool(_o.get("rows"))
-        except Exception:
-            v1_ok = False
-    if not v1_ok:
-        done = {}
-        st["funds"] = {}
-        print("→ 결과 파일이 없거나 비었다. 처음부터 받는다.")
-
-    have = sum(1 for fd in funds if done.get(fd["fund"]) == period)
-    if period == st["period"] and have >= len(funds) and not a.force:
-        print(f"→ 이미 받은 분기다 ({have}/{len(funds)}곳 완료). 할 일 없음.")
-        return
-    if have:
-        print(f"→ {have}/{len(funds)}곳 이미 받음. 나머지만 받는다.")
-
-    # ② 전 분기 = 직전 것
-    prev_period = None
-    fs = Company(funds[0]["cik"]).get_filings(form="13F-HR")
-    for i in range(min(len(fs), 6)):
-        p = str(getattr(fs[i], "period_of_report", "") or "")
-        if p and p != period:
-            prev_period = p
-            break
-    print(f"전 분기 = {prev_period or '없음 (증감 계산 못 함)'}")
-    print("─" * 78)
-
-    # ⚠ 이전 실행 결과를 읽어 이어쓴다. 안 그러면 건너뛴 펀드가 사라진다.
-    v1, hold, skipped = [], {}, []
+    # ⚠ 이전 결과를 읽어 이어쓴다 — 새 분기를 안 낸 펀드는 전 분기 그대로 남는다.
+    #   (2026-11-07 전 파일은 줄에 분기 p 가 없다 → meta.period 로 채운다)
+    v1, hold, skipped, errs = [], {}, [], []
     for path, box in ((f"{OUT}/f13_v1.json", "v1"), (f"{OUT}/f13_hold.json", "hold")):
         if not os.path.exists(path):
             continue
         try:
             with open(path, encoding="utf-8") as f:
                 old = json.load(f)
-            if old.get("meta", {}).get("period") != period:
-                continue                      # 다른 분기 것이면 버린다
+            mp = old.get("meta", {}).get("period")
             if box == "v1":
                 v1 = old.get("rows", [])
+                for x in v1:
+                    x.setdefault("p", mp)
+                    fdv = str(x.get("fd") or "")
+                    if len(fdv) == 5 and x.get("p"):   # 옛 줄은 제출일이 MM-DD → 해를 붙인다 (4분기는 이듬해 제출)
+                        y = int(x["p"][:4]) + (1 if x["p"][5:7] == "12" else 0)
+                        x["fd"] = f"{y}-{fdv}"
             else:
                 hold = old.get("hold", {})
         except Exception as e:
             print(f"⚠ {path} 를 못 읽었다: {e}")
-    if v1 or hold:
+    # ⚠ 상태는 있는데 결과 파일이 비었으면 건너뛰면 안 된다.
+    #   실제로 Actions 가 캐시된 상태만 복원해 빈 결과를 올린 적이 있다.
+    if not v1:
+        done = {}
+        print("→ 결과 파일이 없거나 비었다. 처음부터 받는다.")
+    else:
         print(f"→ 이전 결과 {len(v1)}곳 이어쓴다.")
+    have = {x["n"]: x for x in v1}
 
     for i, fd in enumerate(funds, 1):
         name, cik = fd["fund"], fd["cik"]
-        if done.get(name) == period and not a.force:
-            print(f"{i:>3}. {name:<26} · 이미 받음 (건너뜀)")
+        time.sleep(GAP)
+        try:
+            cf, pf = latest_two(cik)
+        except Exception as e:
+            print(f"{i:>3}. {name:<26} ⚠ {type(e).__name__}: {e}")
+            errs.append(name); continue
+        if cf is None:
+            print(f"{i:>3}. {name:<26} — 13F 기록 없음")
+            skipped.append(name); continue
+        period = str(getattr(cf, "period_of_report", "") or "")
+        if done.get(name) == period and name in have and name in hold and not a.force:
+            print(f"{i:>3}. {name:<26} · {period} 이미 받음")
             continue
         time.sleep(GAP)
         try:
-            cur = fetch(cik, period)
+            _, filed, rows = fetch(cf)
+            prev_rows, prev_period = [], None
+            if pf is not None:
+                time.sleep(GAP)
+                try:
+                    prev_period, _, prev_rows = fetch(pf)
+                except Exception:
+                    prev_rows = []
         except Exception as e:
             print(f"{i:>3}. {name:<26} ⚠ {type(e).__name__}: {e}")
-            skipped.append(name); continue
-
-        if cur is None:
-            print(f"{i:>3}. {name:<26} — {period} 미제출 (다음 실행에서 채운다)")
-            skipped.append(name); continue
-
-        _, filed, rows = cur
-        prev_rows = []
-        if prev_period:
-            time.sleep(GAP)
-            try:
-                pr = fetch(cik, prev_period)
-                prev_rows = pr[2] if pr else []
-            except Exception:
-                pass
+            errs.append(name); continue
 
         rows = diff(rows, prev_rows)
         full = len(rows)
@@ -276,7 +250,7 @@ def main():
 
         v1 = [x for x in v1 if x["n"] != name]
         v1.append({"n": name, "g": fd["group"], "corp": int(fd.get("corp", 0) or 0),
-                   "fd": filed[5:] if len(filed) >= 10 else filed,
+                   "p": period, "pp": prev_period, "fd": filed,   # 분기 · 직전 분기 · 제출일 (YYYY-MM-DD)
                    "nw": nw, "ad": ad, "dn": dn, "ex": ex,
                    "hold": sum(1 for r in rows if r["st"] != "EXIT"),
                    "cut": full if full > CAP else 0,   # 상한에 걸린 펀드는 전체 개수를 남긴다
@@ -302,10 +276,21 @@ def main():
         return
 
     order = {fd["fund"]: i for i, fd in enumerate(funds)}
+    v1 = [x for x in v1 if x["n"] in order]          # 쉬게 한 곳 · 명단에서 빠진 곳은 버린다
+    hold = {k: v for k, v in hold.items() if k in order}
     v1.sort(key=lambda x: order.get(x["n"], 999))
 
+    # 가장 최근 분기 = 지금 화면의 기준 · 그 분기를 아직 안 낸 곳 = 미제출 (전 분기로 남아 있음)
+    newest = max((x.get("p") or "" for x in v1), default="")
+    late = [x["n"] for x in v1 if (x.get("p") or "") < newest]
+    skipped = late + [n for n in skipped if n not in late]
+    prev_newest = next((x.get("pp") for x in v1 if x.get("p") == newest and x.get("pp")), None)
+    per_cnt = {}
+    for x in v1:
+        per_cnt[x.get("p") or ""] = per_cnt.get(x.get("p") or "", 0) + 1
+
     os.makedirs(OUT, exist_ok=True)
-    meta = {"period": period, "prev": prev_period,
+    meta = {"period": newest, "prev": prev_newest, "periods": per_cnt, "errors": errs,
             "built": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "funds": len(v1), "skipped": skipped}
     with open(f"{OUT}/f13_v1.json", "w", encoding="utf-8") as f:
@@ -313,20 +298,22 @@ def main():
     with open(f"{OUT}/f13_hold.json", "w", encoding="utf-8") as f:
         json.dump({"meta": meta, "hold": hold}, f, ensure_ascii=False, separators=(",", ":"))
 
-    st["period"] = period
+    st["period"] = newest
     st["funds"] = done
     save_state(st)
 
     s1 = os.path.getsize(f"{OUT}/f13_v1.json") / 1024
     s2 = os.path.getsize(f"{OUT}/f13_hold.json") / 1024
     print("─" * 78)
-    print(f"받음 {len(v1)}곳 · 건너뜀 {len(skipped)}곳")
+    print(f"받음 {len(v1)}곳 · 분기별 {per_cnt} · {newest} 미제출 {len(skipped)}곳 · 오류 {len(errs)}곳")
     print(f"f13_v1.json    {s1:>7.1f} KB   (한도 1024KB 의 {s1/1024*100:.0f}%)")
     print(f"f13_hold.json  {s2:>7.1f} KB   (한도 1024KB 의 {s2/1024*100:.0f}%)")
     if s2 > 900:
         print("⚠ 상세가 900KB 를 넘었다. 문서를 a/b 로 쪼개야 한다.")
     if skipped:
-        print("건너뜀:", ", ".join(skipped))
+        print("미제출:", ", ".join(skipped))
+    if errs:
+        print("오류:", ", ".join(errs))
 
 
 if __name__ == "__main__":
