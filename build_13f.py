@@ -163,6 +163,12 @@ def main():
 
     with open(a.funds, encoding="utf-8") as f:
         funds = list(csv.DictReader(f))
+    # active=0 = 13F 를 더는 안 내는 곳 (Greenlight · Omega · Aquamarine, 2026-11-07).
+    # ⚠ 지우지 말고 쉬게 둔다 — 다시 1억 달러 문턱을 넘으면 1 로 되살린다.
+    rest = [fd["fund"] for fd in funds if (fd.get("active") or "1").strip() == "0"]
+    funds = [fd for fd in funds if (fd.get("active") or "1").strip() != "0"]
+    if rest:
+        print(f"쉬는 곳 {len(rest)}: {', '.join(rest)}")
     if a.limit:
         funds = funds[:a.limit]
 
