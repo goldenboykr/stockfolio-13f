@@ -158,10 +158,18 @@ def ishares_holdings():
     ⚠ 한국에서는 CSV 대신 상품 페이지가 온다 (2026-11-22 실측). 러너에서 되는지는 기록을 볼 것 — 안 되면 semis.csv 가 그대로 쓰인다."""
     url = "https://www.ishares.com/us/products/239705/ishares-semiconductor-etf/1467271812596.ajax?fileType=csv&fileName=SOXX_holdings&dataType=fund"
     try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=40)
-        txt = r.text.lstrip("﻿")
-        if r.status_code != 200 or txt.lstrip().startswith("<"):
-            print("iShares 보유 종목: 못 받았다 (HTTP %d · %s)" % (r.status_code, "페이지가 옴" if txt.lstrip().startswith("<") else "빈 응답")); return None
+        # ① 손으로 받아 둔 파일이 있으면 그것 (iShares SOXX 페이지 → Holdings → 'Detailed Holdings and Analytics' 로 받은 CSV 를 이 폴더에 SOXX_holdings.csv 로)
+        #    ⚠ 자동 받기는 한국 · GitHub 러너 둘 다 CSV 대신 상품 페이지가 온다 (2026-11-22 실측) — 그래서 파일이 먼저다
+        local = os.path.join(os.path.dirname(os.path.abspath(__file__)), "SOXX_holdings.csv")
+        if os.path.exists(local):
+            with open(local, encoding="utf-8-sig", errors="replace") as f:
+                txt = f.read()
+            print("SOXX_holdings.csv 를 읽는다")
+        else:
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=40)
+            txt = r.text.lstrip(chr(0xFEFF))
+            if r.status_code != 200 or txt.lstrip().startswith("<"):
+                print("iShares 보유 종목: 못 받았다 (HTTP %d · %s)" % (r.status_code, "페이지가 옴" if txt.lstrip().startswith("<") else "빈 응답")); return None
         lines = txt.splitlines()
         k = next((i for i, l in enumerate(lines) if l.startswith("Ticker,")), None)
         if k is None:
