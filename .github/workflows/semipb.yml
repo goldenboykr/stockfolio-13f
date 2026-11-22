@@ -1,0 +1,53 @@
+name: 반도체 합산 PBR
+
+# SOXX 구성 종목(semis.csv)의 시가총액 합 ÷ 자기자본 합 을 날마다 계산해 shared/semipb_v1 에 올린다.
+#   자기자본 · 주식 수 = SEC 공시 (공문서) · 주가 = 야후
+# ⚠ 주가가 날마다 바뀌므로 날마다 돈다. 2분 안쪽이고, 이 저장소는 공개라 분이 무료다.
+# ⚠ 크론은 UTC 다. '40 22 * * 1-5' = KST 화~토 07:40 (미국 장 마감 뒤 · 겨울 마감 KST 06:00)
+on:
+  schedule:
+    - cron: '40 22 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      dry:
+        description: '계산만 하고 올리지 않는다'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: semipb
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # ⚠ requirements.txt 를 쓰지 않는다 — edgartools 는 이 배치에 필요 없고 설치가 길다
+      - name: 라이브러리
+        run: pip install requests google-cloud-firestore
+
+      - name: PBR 계산
+        run: python build_semipb.py
+
+      - name: Firestore 업로드
+        env:
+          FIREBASE_SA_JSON: ${{ secrets.FIREBASE_SA_JSON }}
+        run: python upload_semipb.py ${{ inputs.dry && '--dry' || '' }}
+
+      - name: 결과 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semipb-${{ github.run_id }}
+          path: out/semipb_v1.json
+          retention-days: 14
