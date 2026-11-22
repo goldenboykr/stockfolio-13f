@@ -153,6 +153,31 @@ def rolling_median(v, w):
     return out
 
 
+def ishares_holdings():
+    """SOXX 보유 종목을 iShares 에서 받는다 → [티커] · 못 받으면 None.
+    ⚠ 한국에서는 CSV 대신 상품 페이지가 온다 (2026-11-22 실측). 러너에서 되는지는 기록을 볼 것 — 안 되면 semis.csv 가 그대로 쓰인다."""
+    url = "https://www.ishares.com/us/products/239705/ishares-semiconductor-etf/1467271812596.ajax?fileType=csv&fileName=SOXX_holdings&dataType=fund"
+    try:
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=40)
+        txt = r.text.lstrip("﻿")
+        if r.status_code != 200 or txt.lstrip().startswith("<"):
+            print("iShares 보유 종목: 못 받았다 (HTTP %d · %s)" % (r.status_code, "페이지가 옴" if txt.lstrip().startswith("<") else "빈 응답")); return None
+        lines = txt.splitlines()
+        k = next((i for i, l in enumerate(lines) if l.startswith("Ticker,")), None)
+        if k is None:
+            print("iShares 보유 종목: 표 머리를 못 찾았다"); return None
+        out = []
+        for row in csv.DictReader(lines[k:]):
+            t = (row.get("Ticker") or "").strip().upper()
+            if (row.get("Asset Class") or "").strip() == "Equity" and re.fullmatch(r"[A-Z][A-Z.]{0,5}", t):
+                out.append(t.replace(".", "-"))
+        if len(out) < 20:
+            print("iShares 보유 종목: %d개뿐이라 쓰지 않는다" % len(out)); return None
+        return out
+    except Exception as e:      # noqa: BLE001
+        print("iShares 보유 종목: 못 받았다 (%s)" % repr(e)[:80]); return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=OUT)
@@ -163,6 +188,12 @@ def main():
     tickers = [r["ticker"].strip().upper() for r in rows]
     cik = {r["ticker"].strip().upper(): [int(x) for x in r["cik"].split("|")] for r in rows if (r.get("cik") or "").strip()}   # 첫째가 지금 법인
     hdr = {"User-Agent": sec_ua(), "Accept-Encoding": "gzip, deflate"}
+    # 구성 종목 — iShares 에서 받아지면 그 목록 (새로 든 종목의 CIK 는 아래 SEC 명단에서) · 못 받으면 semis.csv 그대로
+    src = "semis.csv"; live = ishares_holdings()
+    if live:
+        add = [t for t in live if t not in tickers]; gone = [t for t in tickers if t not in live]
+        print("iShares 보유 종목 %d개 · semis.csv 에 없는 것 %s · iShares 에 없는 것 %s" % (len(live), add, gone))
+        tickers = live; src = "iShares"
 
     # CIK 는 semis.csv 에 적어 둔다. SEC 명단이 받아지면 대조해서 다르면 그 종목을 뺀다 (⚠ 식별자는 두 출처로 — 한쪽만 믿지 않는다)
     bad = set()
@@ -257,7 +288,7 @@ def main():
     names = sorted(([t, round(mc / 1e9, 1), round(q / 1e9, 2), round(mc / q, 2), round(mc / m * 100, 1), end] for t, mc, q, end in row), key=lambda r: -r[1])
     out["meta"] = {
         "built": datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds"),
-        "asof": D[-1], "n": len(row), "skipped": skipped,
+        "asof": D[-1], "n": len(row), "skipped": skipped, "src": src,
         "cols": ["ticker", "시가총액(십억$)", "자기자본(십억$)", "PBR", "시총 비중(%)", "자기자본 기말"],
         "names": names,
     }
