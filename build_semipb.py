@@ -13,7 +13,7 @@
     그날 시가총액 = (그날까지 공시된 가장 최근 주식 수 × 그 뒤 분할 배수) × 그날 종가
     그날 자기자본 = 그날까지 공시된 가장 최근 분기 값          ← ⚠ 공시일(filed) 기준이다. 분기말 기준이면 그때 모르던 숫자를 쓰게 된다
     합산 PBR     = Σ 시가총액 ÷ Σ 자기자본                    (셋 다 있는 종목만 · 자기자본 ≤ 0 은 뺀다)
-    정규화       = 합산 PBR ÷ 지난 3 · 5 · 10년(거래일 756 · 1260 · 2520) 가운데값   ← 창이 다 차야 값이 나온다
+    정규화       = 합산 PBR ÷ 지난 3 · 5 · 10년(거래일 756 · 1260 · 2520) 가운데값   ← 자료가 모자란 앞부분은 있는 만큼 (최소 3년)
 
 ⚠ 지금 구성 종목으로 과거를 계산한다 (살아남은 종목만 본 값). 상장 전인 종목은 그때 합산에 없다 — 들어오는 날 값이 조금 뛴다.
 ⚠ us-gaap 자기자본이 없는 해외 공시 기업(TSM · ASML 등)은 저절로 빠진다. 환율 · 회계기준을 추측해 섞지 않는다.
@@ -140,13 +140,15 @@ def at(series, day):
     return None if i < 0 else series[i][1:]
 
 
-def rolling_median(v, w):
+def rolling_median(v, w, minw=756):
+    """지난 w 일 가운데값으로 나눈 값. 자료가 w 일에 못 미치는 앞부분은 있는 만큼(최소 minw 일 = 3년)으로 계산한다
+    — 창이 다 찰 때까지 비워 두면 10년 기준 선이 2020 년에야 시작한다 (2026-11-22 "10년 기준으로 하니 왜 이리 줄어드냐")"""
     out, win = [None] * len(v), []
     for i, x in enumerate(v):
         bisect.insort(win, x)
         if i >= w:
             win.pop(bisect.bisect_left(win, v[i - w]))
-        if i >= w - 1:
+        if i >= min(w, minw) - 1:
             m = len(win) // 2
             med = win[m] if len(win) % 2 else (win[m - 1] + win[m]) / 2
             out[i] = round(x / med, 4) if med > 0 else None
