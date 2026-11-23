@@ -84,9 +84,60 @@ def step_series(units):
     return out
 
 
+def ttm_series(units):
+    """순이익 XBRL 값 목록 → 공시일 순 [(filed, end, 지난 4분기 합)]
+    연간 값(기간 350~380일)은 그대로. 분기 기말은 '직전 연간 + 올해 누적 − 지난해 같은 기간 누적' — 10-Q 는 회계연도 처음부터의 누적을 싣는다.
+    셋 중 하나라도 없으면 그 기말은 건너뛴다 (지어내지 않는다)."""
+    dd = lambda x: datetime.strptime(x, "%Y-%m-%d").date()
+    first = {}
+    for u in units:
+        st, e, f, v = u.get("start"), u.get("end"), u.get("filed"), u.get("val")
+        if not st or not e or not f or v is None:
+            continue
+        k = first.get((st, e))
+        if k is None or f < k[0]:
+            first[(st, e)] = (f, v)
+    ann, oth = {}, {}
+    for (st, e), (f, v) in first.items():
+        d = (dd(e) - dd(st)).days
+        if 350 <= d <= 380:
+            ann[e] = (v, f)
+        elif d < 350:
+            oth.setdefault(e, []).append((st, v, f, d))
+
+    def near(keys, target, tol=10):
+        best = None
+        for k in keys:
+            g = abs((dd(k) - target).days)
+            if g <= tol and (best is None or g < best[0]):
+                best = (g, k)
+        return best[1] if best else None
+
+    out = []
+    for e in sorted(set(ann) | set(oth)):
+        if e in ann:
+            out.append((ann[e][1], e, ann[e][0])); continue
+        st, v, f, d = sorted(oth[e], key=lambda x: x[0])[0]          # 가장 긴 것 = 회계연도 처음부터 누적
+        a = near(ann, dd(st))
+        pe = near(oth, dd(e) - timedelta(days=364))
+        if not a or not pe:
+            continue
+        pv = [x for x in oth[pe] if abs(x[3] - d) <= 10]
+        if not pv:
+            continue
+        out.append((f, e, ann[a][0] + v - pv[0][1]))
+    out.sort()
+    res, top = [], ""
+    for f, e, v in out:
+        if e > top:
+            top = e
+            res.append((f, e, v))
+    return res
+
+
 def sec_company(ciks, hdr):
     """CIK 여럿(법인이 바뀐 회사 — 옛 법인 공시를 잇는다)의 값을 한데 모아 → (자기자본, 주식 수, 회사 이름들)"""
-    equ, shu, shu2, names = [], [], [], []
+    equ, shu, shu2, names, niu = [], [], [], [], []
     for cik in ciks:
         j = get_json("https://data.sec.gov/api/xbrl/companyfacts/CIK%010d.json" % cik, hdr)
         names.append(str(j.get("entityName") or ""))
@@ -99,8 +150,14 @@ def sec_company(ciks, hdr):
         equ += u1 + [u for u in u2 if u.get("end") not in have]
         shu += (((facts.get("dei") or {}).get("EntityCommonStockSharesOutstanding") or {}).get("units") or {}).get("shares") or []
         shu2 += ((g.get("CommonStockSharesOutstanding") or {}).get("units") or {}).get("shares") or []
+        # 순이익 — 꼬리표를 바꾼 회사가 있다 (브로드컴은 2025 부터 NetIncomeLoss 가 없다) → 없는 기간만 다음 꼬리표로 채운다
+        n1 = list(((g.get("NetIncomeLoss") or {}).get("units") or {}).get("USD") or [])
+        for tag in ("ProfitLoss", "NetIncomeLossAvailableToCommonStockholdersBasic"):
+            have = {(u.get("start"), u.get("end")) for u in n1}
+            n1 += [u for u in (((g.get(tag) or {}).get("units") or {}).get("USD") or []) if (u.get("start"), u.get("end")) not in have]
+        niu += n1
         time.sleep(GAP)
-    return step_series(equ), step_series(shu) or step_series(shu2), " + ".join(names)
+    return step_series(equ), step_series(shu) or step_series(shu2), " + ".join(names), ttm_series(niu)
 
 
 # ── 야후 ──────────────────────────────────────────────────────────────
@@ -138,6 +195,16 @@ def at(series, day):
     """[(filed, end, val)] 에서 그날까지 공시된 마지막 것 → (end, val) · 없으면 None"""
     i = bisect.bisect_right(series, (day, "~", 0)) - 1
     return None if i < 0 else series[i][1:]
+
+
+def rolling_median_gaps(v, w):
+    """빈 날(None)이 섞인 값 — 빈 날은 건너뛰고 rolling_median 과 같은 식으로"""
+    idx = [i for i, x in enumerate(v) if x is not None]
+    r = rolling_median([v[i] for i in idx], w)
+    out = [None] * len(v)
+    for j, i in enumerate(idx):
+        out[i] = r[j]
+    return out
 
 
 def rolling_median(v, w, minw=756):
@@ -226,7 +293,7 @@ def main():
         if t not in cik:
             skipped.append([t, "CIK 없음"]); continue
         try:
-            eq, sh, ename = sec_company(cik[t], hdr)
+            eq, sh, ename, ni = sec_company(cik[t], hdr)
         except Exception as e:      # noqa: BLE001
             skipped.append([t, "SEC 실패 " + str(e)[-60:]]); time.sleep(GAP); continue
         time.sleep(GAP)
@@ -256,21 +323,21 @@ def main():
             if med > 0 and 1 / 3 <= row[2] / med <= 3:
                 keep.append(row)
         dropped = len(sh2) - len(keep); sh2 = keep
-        co[t] = {"eq": eq, "sh": sh2, "px": px, "days": sorted(px), "drop": dropped}
+        co[t] = {"eq": eq, "sh": sh2, "px": px, "days": sorted(px), "drop": dropped, "ni": ni}
         print("%-5s %-40s 자기자본 %3d건 (%s~) · 주식 수 %3d건 · 일봉 %5d · 분할 %s" % (t, ename[:40], len(eq), eq[0][0], len(sh2), len(px), sp[-2:]) + (" · 주식 수 버림 %d" % dropped if dropped else ""))
     if len(co) < MIN_NAMES:
         sys.exit("⚠ 받은 종목이 %d개뿐이다 (최소 %d). 만들지 않는다. 빠진 것: %s" % (len(co), MIN_NAMES, skipped))
 
     days = sorted({d for c in co.values() for d in c["days"] if d >= START})
-    D, PB, K = [], [], []
+    D, PB, K, PE, KE = [], [], [], [], []      # PE = Σ시가총액 ÷ Σ순이익(지난 4분기) — 순이익이 있는 종목끼리 · 적자 종목도 합에 넣는다 (지수 방식)
     lastpx = {t: None for t in co}
     for t, c in co.items():       # START 전 마지막 종가
         i = bisect.bisect_left(c["days"], START) - 1
         if i >= 0:
             lastpx[t] = (c["days"][i], c["px"][c["days"][i]])
-    cur = []
+    cur = []; cur2 = None
     for day in days:
-        m = e = 0.0; k = 0; row = []
+        m = e = 0.0; k = 0; row = []; m2 = e2 = 0.0; k2 = 0; row2 = []
         for t, c in co.items():
             p = c["px"].get(day)
             if p is not None:
@@ -286,14 +353,25 @@ def main():
             mc = s[1] * lp[1]
             m += mc; e += q[1]; k += 1
             row.append((t, mc, q[1], q[0]))
+            n = at(c["ni"], day)
+            if n and (datetime.strptime(day, "%Y-%m-%d") - datetime.strptime(n[0], "%Y-%m-%d")).days <= STALE:
+                m2 += mc; e2 += n[1]; k2 += 1; row2.append((t, mc, n[1], n[0]))
         if k >= MIN_NAMES and e > 0:
             D.append(day); PB.append(round(m / e, 4)); K.append(k); cur = (m, e, row)
+            ok = k2 >= MIN_NAMES and e2 > 0 and m2 / e2 < 500
+            PE.append(round(m2 / e2, 3) if ok else None); KE.append(k2)
+            if ok:
+                cur2 = (m2, e2, row2)
     if len(D) < 1000:
         sys.exit("⚠ 계산된 날이 %d일뿐이다. 만들지 않는다." % len(D))
 
     out = {"d": D, "pb": PB, "k": K}
     for key, w in WINS:
         out[key] = rolling_median(PB, w)
+    # 실제 이익 기준 PER (2026-11-23 "pbr 차트에 pe 차트도 · 3년 5년 10년으로 비교") — pe = 원래 값 · e3 · e5 · e10 = 지난 3 · 5 · 10년 가운데값으로 나눈 값 (PBR 과 같은 방식)
+    out["pe"] = PE; out["ke"] = KE
+    for key, w in (("e3", 756), ("e5", 1260), ("e10", 2520)):
+        out[key] = rolling_median_gaps(PE, w)
     m, e, row = cur
     names = sorted(([t, round(mc / 1e9, 1), round(q / 1e9, 2), round(mc / q, 2), round(mc / m * 100, 1), end] for t, mc, q, end in row), key=lambda r: -r[1])
     out["meta"] = {
@@ -301,6 +379,8 @@ def main():
         "asof": D[-1], "n": len(row), "skipped": skipped, "src": src,
         "cols": ["ticker", "시가총액(십억$)", "자기자본(십억$)", "PBR", "시총 비중(%)", "자기자본 기말"],
         "names": names,
+        "pe_names": sorted(([t, round(mc / 1e9, 1), round(n / 1e9, 2), round(mc / n, 1) if n > 0 else None, end] for t, mc, n, end in cur2[2]), key=lambda r: -r[1]) if cur2 else [],
+        "pe_cols": ["ticker", "시가총액(십억$)", "순이익 4분기 합(십억$)", "PER", "순이익 기말"],
     }
     os.makedirs(a.out, exist_ok=True)
     p = os.path.join(a.out, "semipb_v1.json")
@@ -308,6 +388,8 @@ def main():
         json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
     print("\n%s · %d일 (%s ~ %s) · %.0f KB" % (p, len(D), D[0], D[-1], os.path.getsize(p) / 1024))
     print("오늘 합산 PBR %.2f · 종목 %d · 정규화 3년 %s · 5년 %s · 10년 %s" % (PB[-1], len(row), out["n3"][-1], out["n5"][-1], out["n10"][-1]))
+    pv = [x for x in PE if x is not None]
+    print("오늘 합산 PER(실제 이익) %s · 종목 %d · 값 있는 날 %d · 정규화 3년 %s · 5년 %s · 10년 %s" % (PE[-1], KE[-1], len(pv), out["e3"][-1], out["e5"][-1], out["e10"][-1]))
     print("빠진 것:", skipped)
     for r in names[:8]:
         print("  %-5s 시총 %8.1f · 자기자본 %7.2f · PBR %6.2f · 비중 %4.1f%% · 기말 %s" % tuple(r))
