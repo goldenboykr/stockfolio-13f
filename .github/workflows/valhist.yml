@@ -1,0 +1,53 @@
+name: 종목별 · 지수별 PBR · PER
+
+# S&P 500 · 나스닥 100 종목의 PBR · PER 계단 값과, SPY · QQQ · 업종 11개의 합산 PBR · PER 을 날마다 계산해 shared/valco_v1_* · shared/valagg_* 에 올린다.
+#   자기자본 · 순이익 · 주식 수 = SEC 공시 (공문서) · 주가 = 야후 · 구성 종목 = 위키백과 표 · 나스닥 목록
+# ⚠ 500여 종목이라 20~30분 걸린다. 이 저장소는 공개라 분이 무료다.
+# ⚠ 크론은 UTC 다. '10 23 * * 1-5' = KST 화~토 08:10 (반도체 합산 PBR 07:40 뒤)
+on:
+  schedule:
+    - cron: '10 23 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      dry:
+        description: '계산만 하고 올리지 않는다'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: valhist
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 라이브러리
+        run: pip install requests google-cloud-firestore
+
+      - name: 계산
+        run: python build_valhist.py
+
+      - name: Firestore 업로드
+        env:
+          FIREBASE_SA_JSON: ${{ secrets.FIREBASE_SA_JSON }}
+        run: python upload_valhist.py ${{ inputs.dry && '--dry' || '' }}
+
+      # ⚠ 보관 파일에는 SEC · 야후로 계산한 값만 있다 (예상 PER 은 업로드 단계에서 Firestore 안에서만 붙는다)
+      - name: 결과 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: valhist-${{ github.run_id }}
+          path: out/valhist/
+          retention-days: 7
